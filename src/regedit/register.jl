@@ -1,14 +1,3 @@
-showsafe(x) = (x === nothing) ? "nothing" : x
-
-function gitcmd(path::String, gitconfig::Dict)
-    cmd = ["git", "-C", path]
-    for (n,v) in gitconfig
-        push!(cmd, "-c")
-        push!(cmd, "$n=$v")
-    end
-    Cmd(cmd)
-end
-
 """
 Return a `GitRepo` object for an up-to-date copy of `registry`.
 """
@@ -92,15 +81,6 @@ for the project file in that tree and a hash string for the tree.
 #     end
 # end
 
-"""
-Write TOML data (with sorted keys).
-"""
-function write_toml(file::String, data::Dict)
-    open(file, "w") do io
-        TOML.print(io, data, sorted=true)
-    end
-end
-
 struct RegBranch
     name::String
     version::VersionNumber
@@ -157,6 +137,35 @@ function write_registry(registry_path::String, data::Dict)
     open(registry_path, "w") do io
         write_registry(io, data)
     end
+end
+
+import Base: thismajor, thisminor, nextmajor, nextminor, thispatch, nextpatch, lowerbound
+
+# Returns Tuple (error, warning)
+function check_version(existing::Vector{VersionNumber}, ver::VersionNumber)
+    if isempty(existing)
+        if all([lowerbound(v) <= ver <= v for v in [v"0.0.1", v"0.1", v"1"]])
+            return nothing, "This looks like a new registration that registers version $ver. Ideally, you should register an initial release with 0.0.1, 0.1.0 or 1.0.0 version numbers"
+        end
+    else
+        issorted(existing) || (existing = sort(existing))
+        idx = searchsortedlast(existing, ver)
+        if idx <= 0
+            return "Version $ver less than least existing version $(existing[1])", nothing
+        end
+
+        prv = existing[idx]
+        if ver == prv
+            return "Version $ver already exists", nothing
+        end
+        nxt = thismajor(ver) != thismajor(prv) ? nextmajor(prv) :
+              thisminor(ver) != thisminor(prv) ? nextminor(prv) : nextpatch(prv)
+        if ver > nxt
+            return nothing, "Version $ver skips over $nxt"
+        end
+    end
+
+    return nothing, nothing
 end
 
 """
@@ -247,19 +256,9 @@ function register(
         versions_data = isfile(versions_file) ? TOML.parsefile(versions_file) : Dict()
         versions = sort!([VersionNumber(v) for v in keys(versions_data)])
 
-        wa = nothing
-        if pkg.version in versions
-            return RegBranch(pkg, branch; er="Version $(pkg.version) already exists in registry")
-        else
-            try
-                Base.check_new_version(versions, pkg.version)
-            catch ex
-                if isa(ex, ErrorException)
-                    wa=ex.msg
-                else
-                    rethrow(ex)
-                end
-            end
+        err, wa = check_version(versions, pkg.version)
+        if err !== nothing
+            return RegBranch(pkg, branch; er=err)
         end
 
         version_info = Dict{String,Any}("git-tree-sha1" => string(tree_hash))
