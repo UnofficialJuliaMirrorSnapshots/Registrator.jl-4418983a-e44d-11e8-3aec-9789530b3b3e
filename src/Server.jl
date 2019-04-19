@@ -59,7 +59,8 @@ struct RequestParams{T<:RequestTrigger}
         err = nothing
         report_error = false
 
-        action_name, action_args, action_kwargs = parse_submission_string(strip(phrase.captures[1], '`'))
+        command = strip(phrase.captures[1], [' ', '\n', '\r', '`'])
+        action_name, action_args, action_kwargs = parse_submission_string(command)
         target = get(action_kwargs, :target, nothing)
 
         if action_name == "register"
@@ -716,15 +717,21 @@ function make_pull_request(pp::ProcessedParams, rp::RequestParams, rbrn::RegBran
                   "head"=>brn,
                   "maintainer_can_modify"=>true)
     ref = get_html_url(rp.evt.payload)
-    params["body"] = """
-| $name       |     $ver     |
-|-------------|--------------|
-| Proposed by | @$(creator)  |
-| Reviewed by | @$(reviewer) |
-| Reference   | [$ref]($ref) |
 
-$enc_meta
-"""
+    # FYI: TagBot (github.com/apps/julia-tagbot) depends on the "Repository", "Version",
+    # and "Commit" fields. If you're going to change the format here, please ping
+    # @christopher-dG and make sure that WebUI.jl has also been updated.
+    params["body"] = """
+        Registering: $name
+        Repository: $(rp.evt.repository.html_url)
+        Version: v$ver
+        Commit: $(pp.sha)
+        Proposed by: @$creator
+        Reviewed by: @$reviewer
+        Reference: [$ref]($ref)
+
+        $enc_meta
+        """
 
     pr = nothing
     repo = join(split(target_registry["repo"], "/")[end-1:end], "/")
@@ -780,13 +787,13 @@ $enc_meta
         After the above pull request is merged, it is recommended that you create
         a tag on this repository for the registered package version:
         ```
-        git tag -a v$(string(ver)) -m "<description of version>" $(pp.tree_sha)
-        git push v$(string(ver))
+        git tag -a v$(string(ver)) -m "<description of version>" $(pp.sha)
+        git push origin v$(string(ver))
         ```
         """
 
     if rbrn.warning !== nothing
-        cbody += """
+        cbody *= """
             Also, note the warning: $(rbrn.warning)
             This can be safely ignored. However, if you want to fix this you can do so. Call register() again after making the fix. This will update the Pull request.
             """
