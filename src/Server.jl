@@ -43,31 +43,44 @@ end
 struct EmptyTrigger <: RequestTrigger
 end
 
+function register_rights_error(evt, user)
+    if is_owned_by_organization(evt)
+        org = evt.repository.owner.login
+        return "**Register Failed**\n@$(user), it looks like you are not a publicly listed member/owner in the parent organization ($(org)).\nIf you are a member/owner, you will need to change your membership to public. See [GitHub Help](https://help.github.com/en/articles/publicizing-or-hiding-organization-membership)"
+    else
+        return "**Register Failed**\n@$(user), it looks like you don't have collaborator status on this repository."
+    end
+end
+
 struct RequestParams{T<:RequestTrigger}
     evt::WebhookEvent
     phrase::RegexMatch
     reponame::String
     trigger_src::T
-    comment_by_collaborator::Bool
+    commenter_can_register::Bool
     target::Union{Nothing,String}
     cparams::CommonParams
 
     function RequestParams(evt::WebhookEvent, phrase::RegexMatch)
         reponame = evt.repository.full_name
+        user = get_user_login(evt.payload)
         trigger_src = EmptyTrigger()
-        comment_by_collaborator = false
+        commenter_can_register = false
         err = nothing
         report_error = false
 
-        command = strip(phrase.captures[1], [' ', '\n', '\r', '`'])
+        command = strip(phrase.captures[1], [' ', '`'])
         action_name, action_args, action_kwargs = parse_submission_string(command)
         target = get(action_kwargs, :target, nothing)
 
-        if action_name == "register"
+        if evt.payload["repository"]["private"] && get(config["registrator"], "disable_private_registrations", true)
+            err = "Private registration request recieved, ignoring"
+            @debug(err)
+        elseif action_name == "register"
             if endswith(reponame, ".jl")
-                comment_by_collaborator = is_comment_by_collaborator(evt)
-                if comment_by_collaborator
-                    @debug("Comment is by collaborator")
+                commenter_can_register = has_register_rights(evt)
+                if commenter_can_register
+                    @debug("Commenter has registration rights")
                     if is_pull_request(evt.payload)
                         if config["registrator"]["disable_pull_request_trigger"]
                             make_comment(evt, "Pull request comments will not trigger Registrator as it is disabled. Please trying using a commit or issue comment.")
@@ -86,8 +99,9 @@ struct RequestParams{T<:RequestTrigger}
                         trigger_src = IssueTrigger(brn)
                     end
                 else
-                    err = "Comment not made by collaborator"
+                    err = register_rights_error(evt, user)
                     @debug(err)
+                    report_error = true
                 end
                 @debug("Comment is on a pull request")
             else
@@ -102,16 +116,17 @@ struct RequestParams{T<:RequestTrigger}
                 registry_repos = [join(split(r["repo"], "/")[end-1:end], "/") for (n, r) in config["targets"]]
                 if reponame in registry_repos
                     @debug("Recieved approval comment")
-                    comment_by_collaborator = is_comment_by_collaborator(evt)
-                    if comment_by_collaborator
-                        @debug("Comment is by collaborator")
+                    commenter_can_register = has_register_rights(evt)
+                    if commenter_can_register
+                        @debug("Commenter has register rights")
                         if is_pull_request(evt.payload)
                             prid = get_prid(evt.payload)
                             trigger_src = ApprovalTrigger(prid)
                         end
                     else
-                        err = "Comment not made by collaborator"
+                        err = register_rights_error(evt, user)
                         @debug(err)
+                        report_error = true
                     end
                 else
                     @debug("Approval comment not made on a valid registry")
@@ -123,11 +138,11 @@ struct RequestParams{T<:RequestTrigger}
             report_error = true
         end
 
-        isvalid = comment_by_collaborator
+        isvalid = commenter_can_register
         @debug("Event pre-check validity: $isvalid")
 
         return new{typeof(trigger_src)}(evt, phrase, reponame, trigger_src,
-                                        comment_by_collaborator, target,
+                                        commenter_can_register, target,
                                         CommonParams(isvalid, err, report_error))
     end
 end
@@ -169,7 +184,7 @@ function handle_approval(rp::RequestParams{ApprovalTrigger})
     auth = get_access_token(rp.evt)
     d = get_metadata_from_pr_body(rp, auth)
 
-    if d == nothing
+    if d === nothing
         return "Unable to get registration metdata for this PR"
     end
 
@@ -282,7 +297,7 @@ struct ProcessedParams
     cparams::CommonParams
 
     function ProcessedParams(rp::RequestParams)
-        if rp.cparams.error != nothing
+        if rp.cparams.error !== nothing
             @debug("Pre-check failed, not processing RequestParams: $(rp.cparams.error)")
             return ProcessedParams(nothing, nothing, copy(rp.cparams))
         end
@@ -305,7 +320,7 @@ struct ProcessedParams
 
         cloneurl, sha, err = get_cloneurl_and_sha(rp, auth)
 
-        if err == nothing && sha != nothing
+        if err === nothing && sha !== nothing
             projectfile_contents, tree_sha, projectfile_found, projectfile_valid, err = verify_projectfile_from_sha(rp.reponame, sha; auth = auth)
             if !projectfile_found
                 err = "Project file not found on branch `$(rp.trigger_src.branch)`"
@@ -313,7 +328,7 @@ struct ProcessedParams
             end
         end
 
-        isvalid = rp.comment_by_collaborator && projectfile_found && projectfile_valid
+        isvalid = rp.commenter_can_register && projectfile_found && projectfile_valid
         @debug("Event validity: $(isvalid)")
 
         new(projectfile_contents, projectfile_found, projectfile_valid, sha, tree_sha, cloneurl,
@@ -365,7 +380,7 @@ end
 function get_sha_from_branch(reponame, brn; auth = GitHub.AnonymousAuth())
     try
         b = branch(reponame, Branch(brn); auth=auth)
-        sha = b.sha != nothing ? b.sha : b.commit.sha
+        sha = b.sha !== nothing ? b.sha : b.commit.sha
         return sha, nothing
     catch ex
         d = parse_github_exception(ex)
@@ -379,11 +394,28 @@ function get_sha_from_branch(reponame, brn; auth = GitHub.AnonymousAuth())
     return nothing, nothing
 end
 
+function is_owned_by_organization(event)
+  return event.repository.owner.typ == "Organization"
+end
+
 function is_comment_by_collaborator(event)
     @debug("Checking if comment is by collaborator")
     user = get_user_login(event.payload)
     return iscollaborator(event.repository, user; auth=get_access_token(event))
 end
+
+function is_comment_by_org_owner_or_member(event)
+    @debug("Checking if comment is by repository parent organization owner or member")
+    org = event.repository.owner.login
+    user = get_user_login(event.payload)
+    if get(config["registrator"], "check_private_membership", false)
+        return GitHub.check_membership(org, user; auth=get_user_auth())
+    else
+        return GitHub.check_membership(org, user; public_only=true)
+    end
+end
+
+has_register_rights(event) = is_comment_by_collaborator(event) || is_owned_by_organization(event) && is_comment_by_org_owner_or_member(event)
 
 function is_pull_request(payload)
     haskey(payload, "pull_request") || haskey(payload, "issue") && haskey(payload["issue"], "pull_request")
@@ -637,14 +669,14 @@ end
 
 function handle_comment_event(event::WebhookEvent, phrase::RegexMatch)
     rp = RequestParams(event, phrase)
-    isa(rp.trigger_src, EmptyTrigger) && rp.cparams.error == nothing && return
+    isa(rp.trigger_src, EmptyTrigger) && rp.cparams.error === nothing && return
 
-    if rp.cparams.isvalid && rp.cparams.error == nothing
+    if rp.cparams.isvalid && rp.cparams.error === nothing
         print_entry_log(rp)
 
         push!(event_queue, rp)
         set_pending_status(rp)
-    elseif rp.cparams.error != nothing
+    elseif rp.cparams.error !== nothing
         @info("Error while processing event: $(rp.cparams.error)")
         if rp.cparams.report_error
             msg = "Error while trying to register: $(rp.cparams.error)"
@@ -669,7 +701,7 @@ function is_pr_exists_exception(ex)
     d = parse_github_exception(ex)
 
     if d["Status Code"] == "422" &&
-       match(r"A pull request already exists", d["Errors"]) != nothing
+       match(r"A pull request already exists", d["Errors"]) !== nothing
         return true
     end
 
@@ -712,7 +744,7 @@ function make_pull_request(pp::ProcessedParams, rp::RequestParams, rbrn::RegBran
                           "version"=> string(ver)))
     key = config["registrator"]["enc_key"]
     enc_meta = "<!-- " * bytes2hex(encrypt(MbedTLS.CIPHER_AES_128_CBC, key, meta, key)) * " -->"
-    params = Dict("title"=>"Register $name: $ver",
+    params = Dict("title"=>"$(get(rbrn.metadata, "kind", "")) $name: $ver",
                   "base"=>target_registry["base_branch"],
                   "head"=>brn,
                   "maintainer_can_modify"=>true)
@@ -736,10 +768,19 @@ function make_pull_request(pp::ProcessedParams, rp::RequestParams, rbrn::RegBran
     pr = nothing
     repo = join(split(target_registry["repo"], "/")[end-1:end], "/")
     msg = ""
+    auth = get_user_auth()
     try
-        pr = create_pull_request(repo; auth=get_user_auth(), params=params)
+        pr = create_pull_request(repo; auth=auth, params=params)
         msg = "created"
         @debug("Pull request created")
+        try # add labels
+            if get(rbrn.metadata, "labels", nothing) !== nothing
+                edit_issue(repo, pr; auth = get_user_auth(),
+                    params = Dict("labels"=>rbrn.metadata["labels"]))
+            end
+        catch
+            @debug "Failed to add labels, ignoring."
+        end
     catch ex
         if is_pr_exists_exception(ex)
             @debug("Pull request already exists, not creating")
@@ -749,52 +790,40 @@ function make_pull_request(pp::ProcessedParams, rp::RequestParams, rbrn::RegBran
         end
     end
 
-    if pr == nothing
-        # Look for pull request in last 10 pages, each page contains 15 PRs
-        params = Dict("state"=>"open", "per_page"=>15)
-        auth = get_user_auth()
-        prs, page_data = pull_requests(repo; auth=auth, params=params, page_limit=1)
-        for p in prs
-            if p.base.ref == target_registry["base_branch"] && p.head.ref == brn
-                @debug("PR found")
-                pr = p
-                break
-            end
+    if pr === nothing
+        prs, _ = pull_requests(repo; auth=auth, params=Dict(
+            "state" => "open",
+            "base" => params["base"],
+            "head" => string(split(repo, "/")[1], ":", params["head"]),
+        ))
+        if !isempty(prs)
+            @assert length(prs) == 1 "PR lookup should only contain one result"
+            @debug("PR found")
+            pr = prs[1]
         end
 
-        if pr == nothing
-            i = 1
-            while i < 10
-                prs, page_data = pull_requests(repo; auth=auth, page_limit=1, start_page=page_data["next"]);
-                for p in prs
-                    if p.base.ref == target_registry["base_branch"] && p.head.ref == brn
-                        @debug("PR found")
-                        pr = p
-                        break
-                    end
-                end
-                pr == nothing || break
-                i += 1
-            end
+        if pr === nothing
+            error("Registration PR already exists but unable to find it")
+        else
+            update_pull_request(repo, pr.number; auth=auth, params=Dict("body" => params["body"]))
         end
-
-        pr == nothing && error("Registration PR already exists but unable to find it")
     end
 
     cbody = """
         Registration pull request $msg: [$(repo)/$(pr.number)]($(pr.html_url))
 
-        After the above pull request is merged, it is recommended that you create
-        a tag on this repository for the registered package version:
+        After the above pull request is merged, it is recommended that a tag is created on this repository for the registered package version.
+    
+        This will be done automatically if [Julia TagBot](https://github.com/apps/julia-tagbot) is installed, or can be done manually through the github interface, or via:
         ```
         git tag -a v$(string(ver)) -m "<description of version>" $(pp.sha)
         git push origin v$(string(ver))
         ```
         """
 
-    if rbrn.warning !== nothing
+    if get(rbrn.metadata, "warning", nothing) !== nothing
         cbody *= """
-            Also, note the warning: $(rbrn.warning)
+            Also, note the warning: $(rbrn.metadata["warning"])
             This can be safely ignored. However, if you want to fix this you can do so. Call register() again after making the fix. This will update the Pull request.
             """
     end
@@ -823,7 +852,7 @@ function handle_events(rp::RequestParams{ApprovalTrigger})
     @info("Processing approval event", reponame=rp.reponame, rp.trigger_src.prid)
     try
         err = handle_approval(rp)
-        if err != nothing
+        if err !== nothing
             @debug(err)
             make_comment(rp.evt, "Error in approval process: $err")
         end
@@ -843,14 +872,14 @@ string(::RequestParams{ApprovalTrigger}) = "approval"
 function handle_register(rp::RequestParams, target_registry::Dict{String,Any})
     pp = ProcessedParams(rp)
 
-    if pp.cparams.isvalid && pp.cparams.error == nothing
+    if pp.cparams.isvalid && pp.cparams.error === nothing
         rbrn = register(pp.cloneurl, Pkg.Types.read_project(copy(IOBuffer(pp.projectfile_contents))), pp.tree_sha;
             registry=target_registry["repo"],
             registry_deps=get(config["registrator"], "registry_deps", String[]),
             push=true,
             gitconfig=Dict("user.name"=>config["github"]["user"], "user.email"=>config["github"]["email"]))
-        if rbrn.error !== nothing
-            msg = "Error while trying to register: $(rbrn.error)"
+        if get(rbrn.metadata, "error", nothing) !== nothing
+            msg = "Error while trying to register: $(rbrn.metadata["error"])"
             @debug(msg)
             make_comment(rp.evt, msg)
             set_error_status(rp)
@@ -858,7 +887,7 @@ function handle_register(rp::RequestParams, target_registry::Dict{String,Any})
             make_pull_request(pp, rp, rbrn, target_registry)
             set_success_status(rp)
         end
-    elseif pp.cparams.error != nothing
+    elseif pp.cparams.error !== nothing
         @info("Error while processing event: $(pp.cparams.error)")
         if pp.cparams.report_error
             msg = "Error while trying to register: $(pp.cparams.error)"
@@ -929,7 +958,7 @@ end
 
 function github_webhook(http_ip=config["server"]["http_ip"], http_port=get(config["server"], "http_port", parse(Int, get(ENV, "PORT", "8001"))))
     auth = get_jwt_auth()
-    trigger = Regex("@$(config["registrator"]["trigger"]) (.*?)\$")
+    trigger = Regex("@$(config["registrator"]["trigger"]) (.*?)(\\n|\\r)*\$")
     listener = GitHub.CommentListener(comment_handler, trigger; check_collab=false, auth=auth, secret=config["github"]["secret"])
     httpsock[] = Sockets.listen(IPv4(http_ip), http_port)
 
