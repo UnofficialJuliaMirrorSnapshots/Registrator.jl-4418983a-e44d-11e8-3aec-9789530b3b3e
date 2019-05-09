@@ -77,38 +77,32 @@ struct RequestParams{T<:RequestTrigger}
             err = "Private registration request recieved, ignoring"
             @debug(err)
         elseif action_name == "register"
-            if endswith(reponame, ".jl")
-                commenter_can_register = has_register_rights(evt)
-                if commenter_can_register
-                    @debug("Commenter has registration rights")
-                    if is_pull_request(evt.payload)
-                        if config["registrator"]["disable_pull_request_trigger"]
-                            make_comment(evt, "Pull request comments will not trigger Registrator as it is disabled. Please trying using a commit or issue comment.")
-                        else
-                            @debug("Comment is on a pull request")
-                            prid = get_prid(evt.payload)
-                            trigger_src = PullRequestTrigger(prid)
-                        end
-                    elseif is_commit_comment(evt.payload)
-                        @debug("Comment is on a commit")
-                        trigger_src = CommitCommentTrigger()
+            commenter_can_register = has_register_rights(evt)
+            if commenter_can_register
+                @debug("Commenter has registration rights")
+                if is_pull_request(evt.payload)
+                    if config["registrator"]["disable_pull_request_trigger"]
+                        make_comment(evt, "Pull request comments will not trigger Registrator as it is disabled. Please trying using a commit or issue comment.")
                     else
-                        @debug("Comment is on an issue")
-                        brn = get(action_kwargs, :branch, "master")
-                        @debug("Will use branch", brn)
-                        trigger_src = IssueTrigger(brn)
+                        @debug("Comment is on a pull request")
+                        prid = get_prid(evt.payload)
+                        trigger_src = PullRequestTrigger(prid)
                     end
+                elseif is_commit_comment(evt.payload)
+                    @debug("Comment is on a commit")
+                    trigger_src = CommitCommentTrigger()
                 else
-                    err = register_rights_error(evt, user)
-                    @debug(err)
-                    report_error = true
+                    @debug("Comment is on an issue")
+                    brn = get(action_kwargs, :branch, "master")
+                    @debug("Will use branch", brn)
+                    trigger_src = IssueTrigger(brn)
                 end
-                @debug("Comment is on a pull request")
             else
-                err = "Package name does not end with '.jl'"
+                err = register_rights_error(evt, user)
                 @debug(err)
                 report_error = true
             end
+            @debug("Comment is on a pull request")
         elseif action_name == "approved"
             if config["registrator"]["disable_approval_process"]
                 make_comment(evt, "The `approved()` command is disabled.")
@@ -336,10 +330,6 @@ struct ProcessedParams
     end
 end
 
-# `x` can only be Expr, Symbol, QuoteNode, T<:Number, or T<:AbstractString
-phrase_argument(x::Union{Expr, Symbol, QuoteNode}) = string(x)
-phrase_argument(x::Union{AbstractString, Number})  = repr(x)
-
 function parse_submission_string(fncall)
     argind = findfirst(isequal('('), fncall)
     name = fncall[1:(argind - 1)]
@@ -350,17 +340,17 @@ function parse_submission_string(fncall)
         for x in parsed_args.args
             if isa(x, Expr) && (x.head == :kw || x.head == :(=)) && isa(x.args[1], Symbol)
                 @assert !haskey(kwargs, x.args[1]) "kwargs must all be unique"
-                kwargs[x.args[1]] = phrase_argument(x.args[2])
+                kwargs[x.args[1]] = string(x.args[2])
                 started_kwargs = true
             else
                 @assert !started_kwargs "kwargs must come after other args"
-                push!(args, phrase_argument(x))
+                push!(args, string(x))
             end
         end
     elseif isa(parsed_args, Expr) && parsed_args.head == :(=) && isa(parsed_args.args[1], Symbol)
-        kwargs[parsed_args.args[1]] = phrase_argument(parsed_args.args[2])
+        kwargs[parsed_args.args[1]] = string(parsed_args.args[2])
     else
-        push!(args, phrase_argument(parsed_args))
+        push!(args, string(parsed_args))
     end
     return name, args, kwargs
 end
@@ -482,13 +472,9 @@ function is_pfile_nuv(c)
             return false, err
         end
     catch ex
-        if isa(ex, ArgumentError)
-            err = "Error reading Project.toml: $(ex.msg)"
-            @debug(err)
-            return false, err
-        else
-            rethrow(ex)
-        end
+        err = "Error reading Project.toml: $(ex.msg)"
+        @debug(err)
+        return false, err
     end
 
     return true, nothing
@@ -813,7 +799,7 @@ function make_pull_request(pp::ProcessedParams, rp::RequestParams, rbrn::RegBran
         Registration pull request $msg: [$(repo)/$(pr.number)]($(pr.html_url))
 
         After the above pull request is merged, it is recommended that a tag is created on this repository for the registered package version.
-    
+
         This will be done automatically if [Julia TagBot](https://github.com/apps/julia-tagbot) is installed, or can be done manually through the github interface, or via:
         ```
         git tag -a v$(string(ver)) -m "<description of version>" $(pp.sha)
