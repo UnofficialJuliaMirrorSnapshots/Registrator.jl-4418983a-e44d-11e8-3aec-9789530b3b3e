@@ -12,53 +12,24 @@ using Pkg
 using Sockets
 using TimeToLive
 
-const ROUTE_INDEX = "/"
-const ROUTE_AUTH = "/auth"
-const ROUTE_CALLBACK = "/callback"
-const ROUTE_SELECT = "/select"
-const ROUTE_REGISTER = "/register"
+# Not const since they can be changed if $ROUTE_PREFIX is set.
+ROUTE_INDEX = "/"
+ROUTE_AUTH = "/auth"
+ROUTE_CALLBACK = "/callback"
+ROUTE_SELECT = "/select"
+ROUTE_REGISTER = "/register"
 
 const DOCS = "https://github.com/JuliaRegistries/Registrator.jl/blob/master/README.web.md#usage-for-package-maintainers"
-
-const TEMPLATE = """
-    <!DOCTYPE html>
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <title>Registrator</title>
-        <style>
-          body {
-            background-color: #ddd;
-            text-align: center;
-            margin: auto;
-            max-width: 50em;
-            font-family: Helvetica, sans-serif;
-            line-height: 1.5;
-            color: #333;
-          }
-          a {
-            color: inherit;
-          }
-          h3, h4 {
-            color: #555;
-          }
-        </style>
-      </head>
-      <body>
-        <h1><a href=$ROUTE_INDEX>Registrator</a></h1>
-        <h4>Registry URL: <a href="{{registry}}" target="_blank">{{registry}}</a></h3>
-        <h3>Click <a href="$DOCS" target="_blank">here</a> for usage instructions</h3>
-        <br>
-        {{body}}
-      </body>
-    </html>
-    """
 
 const PAGE_SELECT = """
     <form action="$ROUTE_REGISTER" method="post">
     URL of package to register: <input type="text" size="50" name="package">
     <br>
     Branch to register: <input type="text" size="20" name="ref" value="master">
+    <br>
+    Patch notes (optional):
+    <br>
+    <textarea cols="80" rows="10" name="notes"></textarea>
     <br>
     <input type="submit" value="Submit">
     </form>
@@ -136,9 +107,40 @@ end
 # Return an HTML response.
 html(body::AbstractString) = html(200, body)
 function html(status::Int, body::AbstractString)
-    doc = TEMPLATE
-    doc = replace(doc, "{{body}}" => body)
-    doc = replace(doc, "{{registry}}" => REGISTRY[].url)
+    registry = REGISTRY[].url
+    doc = """
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <meta charset="utf-8">
+            <title>Registrator</title>
+            <style>
+              body {
+                background-color: #ddd;
+                text-align: center;
+                margin: auto;
+                max-width: 50em;
+                font-family: Helvetica, sans-serif;
+                line-height: 1.8;
+                color: #333;
+              }
+              a {
+                color: inherit;
+              }
+              h3, h4 {
+                color: #555;
+              }
+            </style>
+          </head>
+          <body>
+            <h1><a href=$ROUTE_INDEX>Registrator</a></h1>
+            <h4>Registry URL: <a href="$registry" target="_blank">$registry</a></h3>
+            <h3>Click <a href="$DOCS" target="_blank">here</a> for usage instructions</h3>
+            <br>
+            $body
+          </body>
+        </html>
+        """
     return HTTP.Response(status, ["Content-Type" => "text/html"]; body=doc)
 end
 
@@ -267,8 +269,12 @@ mention(u::GitLab.User) = "@$(u.username)"
 display_user(u::U) where U =
     (parentmodule(typeof(REGISTRY[].repo)) === parentmodule(U) ? mention : web_url)(u)
 
-# Trim both whitespace and + characters, which indicate spaces in the browser input.
-stripform(s::AbstractString) = strip(strip(s), '+')
+# Parse an HTML form.
+function parseform(s::AbstractString)
+    # In forms, '+' represents a space.
+    pairs = split(replace(s, "+" => " "), "&")
+    return Dict(map(p -> map(strip ∘ HTTP.unescapeuri, split(p, "=")), pairs))
+end
 
 ##########
 # Routes #
@@ -361,14 +367,15 @@ function register(r::HTTP.Request)
     end
     u = USERS[state]
 
-    # Parse the form data.
-    form = Dict(map(p -> map(HTTP.unescapeuri, split(p, "=")), split(String(r.body), "&")))
-    package = stripform(form["package"])
+    # Extract the form data.
+    form = parseform(String(r.body))
+    package = get(form, "package", "")
     isempty(package) && return html(400, "Package URL was not provided")
     occursin("://", package) || (package = "https://$package")
     match(r"https?://.*\..*/.*/.*", package) === nothing && return html(400, "Package URL is invalid")
-    ref = stripform(form["ref"])
+    ref = get(form, "ref", "")
     isempty(ref) && return html(400, "Branch was not provided")
+    notes = get(form, "notes", "")
 
     # Get the repo, then check for authorization.
     owner, name = splitrepo(package)
@@ -402,18 +409,16 @@ function register(r::HTTP.Request)
     )
 
     return if get(branch.metadata, "error", nothing) === nothing
-        title = "Register $(project.name): v$(project.version)"
-
-        # FYI: TagBot (github.com/apps/julia-tagbot) depends on the "Repository", "Version",
-        # and "Commit" fields. If you're going to change the format here, please ping
-        # @christopher-dG and make sure that Server.jl has also been updated.
-        body = """
-            - Created by: $(display_user(u.user))
-            - Repository: $(web_url(repo))
-            - Branch: $ref
-            - Version: v$(project.version)
-            - Commit: $commit
-            """
+        title, body = pull_request_contents(;
+            registration_type=get(branch.metadata, "kind", ""),
+            package=project.name,
+            repo=web_url(repo),
+            user=display_user(u.user),
+            branch=ref,
+            version=project.version,
+            commit=commit,
+            patch_notes=notes,
+        )
 
         # Make the PR.
         pr = @gf make_registration_request(REGISTRY[], branch.branch, title, body)
@@ -514,6 +519,11 @@ function start_server(ip::IPAddr, port::Int, verbose::Bool=false)
 end
 
 function main(; port::Int, ip::AbstractString="0.0.0.0", verbose::Bool=false)
+    if haskey(ENV, "ROUTE_PREFIX")
+        for r in [:ROUTE_INDEX, :ROUTE_AUTH, :ROUTE_CALLBACK, :ROUTE_SELECT, :ROUTE_REGISTER]
+            @eval $r = ENV["ROUTE_PREFIX"] * $r
+        end
+    end
     init_providers()
     init_registry()
     ip = ip == "localhost" ? Sockets.localhost : parse(IPAddr, ip)
