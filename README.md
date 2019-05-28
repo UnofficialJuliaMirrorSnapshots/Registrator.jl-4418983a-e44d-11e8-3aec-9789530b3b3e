@@ -23,7 +23,13 @@ First, install the app on your package(s) as mentioned above.  The procedure for
 Registrator will look for the project file in the master branch by default, and will use the version set in the Project.toml file via, for example, `version = "0.1.0"`. To use a custom branch comment with:
 
 ```
-@JuliaRegistrator register(branch="name-of-your-branch")
+@JuliaRegistrator register() branch=name-of-your-branch
+```
+
+The old pseudo-Julia syntax is also still supported:
+
+```
+@JuliaRegistrator register(branch="foo")
 ```
 
 ### Transitioning from REQUIRE to Project.toml
@@ -36,8 +42,8 @@ Check that your package conforms to the required `Project.toml` structure found 
 
 Either:
 
-1. Open an issue and add ` @JuliaRegistrator register() ` as a comment.  You can re-trigger the registrator by commenting ` @JuliaRegistrator register() ` again (in case registrator reports an error or to make changes).
-2. Add a comment to a commit and say ` @JuliaRegistrator register() `.
+1. Open an issue and add ` @JuliaRegistrator register()` as a comment.  You can re-trigger the registrator by commenting ` @JuliaRegistrator register()` again (in case registrator reports an error or to make changes).
+2. Add a comment to a commit and say ` @JuliaRegistrator register()`.
 
 *Note*: Only *collaborators* on the package repository and *public members* on the organization the package is under are allowed to register. If you are not a collaborator, you can request a collaborator trigger registrator in a GitHub issue or a comment on a commit.
 
