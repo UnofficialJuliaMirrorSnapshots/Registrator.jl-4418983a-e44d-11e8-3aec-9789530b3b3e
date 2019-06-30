@@ -49,7 +49,7 @@ function isauthorized(u::User{GitLab.User}, repo::GitLab.Project)
         # Same as above: group membership then collaborator check.
         ismember = @gf is_member(forge, repo.namespace.full_path, u.user.id)
         something(ismember, false) ||
-            @gf is_collaborator(u.forge, repo.organization.login, repo.name, u.user.id)
+            @gf is_collaborator(u.forge, repo.namespace.full_path, repo.name, u.user.id)
     end
     return something(hasauth, false)
 end
@@ -101,7 +101,8 @@ function gettreesha(::GitLabAPI, r::GitLab.Project, ref::AbstractString)
         mktempdir() do dir
             dest = joinpath(dir, r.name)
             run(`git clone $url $dest`)
-            match(r"tree (.*)", readchomp(`git -C $dest show $ref --format=raw`))[1]
+            run(`git -C $dest checkout $ref`)
+            match(r"tree (.*)", readchomp(`git -C $dest show --format=raw`))[1]
         end
     catch ex
         println(get_backtrace(ex))

@@ -1,5 +1,4 @@
 # Step 5: Register the package (maybe).
-# TODO: Use a register queue and call RegService
 function register(r::HTTP.Request)
     r.method == "POST" || return json(405; error="Method not allowed")
 
@@ -34,7 +33,7 @@ function register(r::HTTP.Request)
         return json(400; error="Project.toml is invalid")
     end
     for k in [:name, :uuid, :version]
-        getfield(project, k) === nothing && return json(400; error="Package $k is invalid")
+        getfield(project, k) === nothing && return json(400; error="In Project.toml, `$k` is missing or invalid")
     end
 
     commit = getcommithash(u.forge, repo, ref)
