@@ -21,7 +21,7 @@ There are two ways to use Registrator: a web interface and a GitHub app.
 This workflow supports repositories hosted on either GitHub or GitLab.
 
 Go to https://pkg.julialang.org/registrator/ and follow the instructions.
-There are also more detailed instructions [here](README.web.md#usage-for-package-maintainers).
+There are also more detailed instructions [here](https://juliaregistries.github.io/Registrator.jl/stable/webui/#Usage-(For-Package-Maintainers)-1).
 
 ### Via the GitHub App
 
@@ -62,7 +62,7 @@ Either:
 
 *Note*: Only *collaborators* on the package repository and *public members* on the organization the package is under are allowed to register. If you are not a collaborator, you can request a collaborator trigger registrator in a GitHub issue or a comment on a commit.
 
-If you want to register as a private member you should host your own instance of Registrator, see [docs.md](https://github.com/JuliaRegistries/Registrator.jl/blob/master/docs.md)
+If you want to register as a private member you should host your own instance of Registrator, see the [documentation](https://juliaregistries.github.io/Registrator.jl/stable/hosting/).
 
 ### Release notes
 
@@ -84,12 +84,17 @@ Note that if you have not enabled TagBot, no release will be made at all, and so
 
 The Julia package manager **does not** rely on git tags and GitHub releases. However, Registrator will generate a `git tag` command for you to optionally create a corresponding tag with your package version, or you can use TagBot as is mentioned above.
 
+### Note on documentation build
+
+The docs for your project will be automatically built by [DocumentationGenerator.jl](https://github.com/JuliaDocs/DocumentationGenerator.jl). Please see that repo for details. Your docs should show up at pkg.julialang.org/docs.
+
+By default, `docs/make.jl` will be run to build the docs. If that is missing, the `README.md` will be used instead.
+
 ## Approving pull requests on the registry
 
 Currently, a registry maintainer will manually merge the pull request made by Registrator.  We will soon have a CI system to check and auto-merge without human intervention.
 
 ## Private packages and registries
 
-Private packages will be ignored by the current running instance of Registrator. Please see [docs.md](https://github.com/JuliaRegistries/Registrator.jl/blob/master/docs.md) on how to host your own Registrator for private packages.
-
-For more info on running your own instance of Registrator, see the documentation in [docs.md](https://github.com/JuliaRegistries/Registrator.jl/blob/master/docs.md)
+Private packages will be ignored by the current running instance of Registrator. 
+Please see the [documentation](https://juliaregistries.github.io/Registrator.jl/stable/hosting/) on how to host your own Registrator for private packages.
